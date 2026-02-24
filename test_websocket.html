@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket TTS 测试</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            padding: 30px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .status {
+            padding: 10px 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .status.disconnected {
+            background: #fee;
+            color: #c33;
+        }
+
+        .status.connected {
+            background: #efe;
+            color: #3c3;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        textarea, select, input[type="range"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 14px;
+            font-family: inherit;
+            transition: border-color 0.3s;
+        }
+
+        textarea:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+
+        .range-container {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        input[type="range"] {
+            flex: 1;
+            padding: 0;
+        }
+
+        .range-value {
+            min-width: 50px;
+            text-align: center;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            flex: 1;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .log-container {
+            background: #1e1e1e;
+            border-radius: 6px;
+            padding: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+            margin-top: 20px;
+        }
+
+        .log {
+            color: #d4d4d4;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .log .info {
+            color: #4ec9b0;
+        }
+
+        .log .success {
+            color: #4caf50;
+        }
+
+        .log .error {
+            color: #f44336;
+        }
+
+        .log .warning {
+            color: #ff9800;
+        }
+
+        .presets {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 15px;
+        }
+
+        .preset-btn {
+            padding: 6px 12px;
+            background: #f0f0f0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .preset-btn:hover {
+            background: #e0e0e0;
+            border-color: #bbb;
+        }
+
+        .info-card {
+            background: #f5f5f5;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin-top: 20px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .info-card h3 {
+            color: #333;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .generating {
+            animation: pulse 1.5s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebSocket TTS 测试</h1>
+        <p class="subtitle">Kokoro TTS 实时语音合成测试工具</p>
+
+        <div id="status" class="status disconnected">
+            未连接
+        </div>
+
+        <div class="form-group">
+            <label>快捷文本:</label>
+            <div class="presets">
+                <button class="preset-btn" onclick="setPreset('你好，这是一个测试。')">问候语</button>
+                <button class="preset-btn" onclick="setPreset('今天天气怎么样？我想去公园散步。')">长句</button>
+                <button class="preset-btn" onclick="setPreset('Hello 你好，this is a test 这是一个测试。')">中英混合</button>
+                <button class="preset-btn" onclick="setPreset('1234567890，今天的日期是2024年1月1日。')">数字测试</button>
+                <button class="preset-btn" onclick="setPresetMarkdown()">Markdown测试</button>
+                <button class="preset-btn" onclick="setPresetSymbols()">特殊符号</button>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="formatSelect">输入格式:</label>
+            <select id="formatSelect">
+                <option value="plain" selected>Plain (纯文本)</option>
+                <option value="markdown">Markdown (自动清洗格式)</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="textInput">输入文本:</label>
+            <textarea id="textInput" placeholder="在此输入要合成的文本...">你好，这是一个WebSocket TTS测试。This is a test of the WebSocket text-to-speech system.</textarea>
+        </div>
+
+        <div class="form-group">
+            <label for="voiceSelect">选择音色:</label>
+            <select id="voiceSelect">
+                <option value="af_heart">af_heart - 女声 (Heart)</option>
+                <option value="am_adam">am_adam - 男声 (Adam)</option>
+                <option value="af_maple" selected>af_maple - 双语声 (Maple) ✅</option>
+                <option value="af_sol">af_sol - 双语声 (Sol) ✅</option>
+                <option value="bf_vale">bf_vale - 双语声 (Vale) ✅</option>
+                <option value="af_sarah">af_sarah - 女声 (Sarah)</option>
+                <option value="am_michael">am_michael - 男声 (Michael)</option>
+                <option value="af_nicole">af_nicole - 女声 (Nicole)</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="speedRange">语速: <span id="speedValue">1.0</span>x</label>
+            <div class="range-container">
+                <input type="range" id="speedRange" min="0.5" max="2.0" step="0.1" value="1.0">
+                <span class="range-value" id="speedDisplay">1.0</span>
+            </div>
+        </div>
+
+        <div class="button-group">
+            <button id="connectBtn" class="btn-secondary">连接</button>
+            <button id="generateBtn" class="btn-primary" disabled>生成语音</button>
+            <button id="clearBtn" class="btn-secondary">清空日志</button>
+        </div>
+
+        <div class="log-container">
+            <div id="log" class="log"></div>
+        </div>
+
+        <div class="info-card">
+            <h3>使用说明</h3>
+            <p>1. 点击"连接"按钮连接到 WebSocket 服务器</p>
+            <p>2. 输入要合成的文本，选择音色和语速</p>
+            <p>3. 点击"生成语音"开始合成</p>
+            <p>4. 音频会自动播放，并在日志中显示详细信息</p>
+        </div>
+    </div>
+
+    <script>
+        const statusDiv = document.getElementById('status');
+        const connectBtn = document.getElementById('connectBtn');
+        const generateBtn = document.getElementById('generateBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const textInput = document.getElementById('textInput');
+        const formatSelect = document.getElementById('formatSelect');
+        const voiceSelect = document.getElementById('voiceSelect');
+        const speedRange = document.getElementById('speedRange');
+        const speedDisplay = document.getElementById('speedDisplay');
+        const logDiv = document.getElementById('log');
+
+        let ws = null;
+        let audioContext = null;
+        let isGenerating = false;
+
+        // 音频播放队列
+        let audioQueue = [];
+        let isPlayingAudio = false;
+
+        // 语速滑块更新
+        speedRange.addEventListener('input', () => {
+            speedDisplay.textContent = speedRange.value;
+        });
+
+        // 设置快捷文本
+        function setPreset(text) {
+            textInput.value = text;
+            addLog('已设置文本: ' + text.substring(0, 30) + '...', 'info');
+        }
+
+        // 设置 Markdown 测试文本
+        function setPresetMarkdown() {
+            const markdown = `# 欢迎使用 Kokoro TTS
+
+这是一个**非常好用**的文本转语音API！
+
+## 主要功能
+- 支持 Markdown 格式
+- 智能句子分割
+- 数学符号朗读: 3×4=12
+- 单位转换: 25℃
+
+感谢您的使用！`;
+            textInput.value = markdown;
+            formatSelect.value = 'markdown';
+            addLog('已设置 Markdown 测试文本', 'info');
+        }
+
+        // 设置特殊符号测试文本
+        function setPresetSymbols() {
+            const symbols = '数学符号测试：3乘以4等于12，10除以2等于5。\n\n单位符号测试：温度是25摄氏度，湿度是50%。\n\n货币符号测试：价格是100美元，折扣是50%。';
+            textInput.value = symbols;
+            formatSelect.value = 'plain';
+            addLog('已设置特殊符号测试文本', 'info');
+        }
+
+        // 添加音频到队列并播放
+        function playAudioQueue(audioData) {
+            audioQueue.push(audioData);
+
+            if (!isPlayingAudio) {
+                playNextAudio();
+            }
+        }
+
+        // 播放下一个音频
+        async function playNextAudio() {
+            if (audioQueue.length === 0) {
+                isPlayingAudio = false;
+                return;
+            }
+
+            isPlayingAudio = true;
+            const audioData = audioQueue.shift();
+
+            try {
+                const audioBuffer = await audioContext.decodeAudioData(await audioData.arrayBuffer());
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+
+                // 当音频播放完成后，播放下一个
+                source.onended = () => {
+                    addLog(`✓ 音频块播放完成，剩余队列: ${audioQueue.length}`, 'success');
+                    playNextAudio();
+                };
+
+                source.start();
+                addLog(`▶ 播放音频块: ${audioData.size} 字节, ${audioBuffer.duration.toFixed(2)}秒`, 'info');
+            } catch (e) {
+                addLog(`播放音频失败: ${e.message}`, 'error');
+                // 出错时继续播放下一个
+                playNextAudio();
+            }
+        }
+
+        // 添加日志
+        function addLog(message, type = '') {
+            const timestamp = new Date().toLocaleTimeString();
+            const className = type ? ` class="${type}"` : '';
+            logDiv.innerHTML += `<div${className}>[${timestamp}] ${message}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        // 清空日志
+        clearBtn.addEventListener('click', () => {
+            logDiv.innerHTML = '';
+            addLog('日志已清空', 'info');
+        });
+
+        // 连接WebSocket
+        connectBtn.addEventListener('click', () => {
+            if (ws) {
+                ws.close();
+                ws = null;
+                updateStatus(false);
+                connectBtn.textContent = '连接';
+                generateBtn.disabled = true;
+                addLog('已断开连接', 'warning');
+                return;
+            }
+
+            const wsUrl = 'ws://localhost:9880/ws/tts';
+            addLog('正在连接到 ' + wsUrl + '...', 'info');
+
+            try {
+                ws = new WebSocket(wsUrl);
+
+                ws.onopen = () => {
+                    updateStatus(true);
+                    connectBtn.textContent = '断开';
+                    generateBtn.disabled = false;
+                    addLog('✓ 连接成功!', 'success');
+
+                    // 初始化音频上下文
+                    if (!audioContext) {
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    }
+                };
+
+                ws.onmessage = async (event) => {
+                    const data = event.data;
+
+                    // 调试：显示消息类型
+                    const isBinary = data instanceof Blob;
+                    if (!isBinary) {
+                        console.log('收到消息:', data.substring(0, 100));
+                    } else {
+                        console.log('收到音频数据:', data.size, '字节');
+                    }
+
+                    // 检查是否是JSON消息
+                    try {
+                        const msg = JSON.parse(data);
+                        if (msg.type === 'sentence_start') {
+                            addLog(`📝 句子 ${msg.index}: ${msg.text.substring(0, 40)}... (音色: ${msg.voice})`, 'info');
+                        } else if (msg.type === 'sentence_end') {
+                            addLog(`  ✓ 句子 ${msg.index} 音频已加入队列`, 'info');
+                        } else if (msg.type === 'done') {
+                            addLog(`✓ 合成完成! 共 ${msg.total_sentences} 句, ${msg.total_chunks} 个音频块, ${msg.total_bytes} 字节`, 'success');
+                            isGenerating = false;
+                            generateBtn.textContent = '生成语音';
+                            generateBtn.classList.remove('generating');
+                        } else if (msg.type === 'error') {
+                            addLog(`✗ 错误: ${msg.message}`, 'error');
+                            isGenerating = false;
+                            generateBtn.textContent = '生成语音';
+                            generateBtn.classList.remove('generating');
+                        }
+                        return;
+                    } catch (e) {
+                        // 不是JSON，是音频数据
+                        console.log('解析为JSON失败，当作音频处理');
+                    }
+
+                    // 音频数据 - 加入队列
+                    console.log('音频队列长度:', audioQueue.length);
+                    playAudioQueue(data);
+                };
+
+                ws.onerror = (error) => {
+                    addLog('连接错误，请确保服务正在运行', 'error');
+                    addLog('运行命令: uvicorn api:api --host 0.0.0.0 --port 9880 --reload', 'warning');
+                };
+
+                ws.onclose = () => {
+                    updateStatus(false);
+                    connectBtn.textContent = '连接';
+                    generateBtn.disabled = true;
+                    addLog('连接已关闭', 'warning');
+                };
+            } catch (e) {
+                addLog('连接失败: ' + e.message, 'error');
+            }
+        });
+
+        // 生成语音
+        generateBtn.addEventListener('click', () => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('请先连接到服务器', 'error');
+                return;
+            }
+
+            const text = textInput.value.trim();
+            if (!text) {
+                addLog('请输入要合成的文本', 'error');
+                return;
+            }
+
+            const voice = voiceSelect.value;
+            const speed = parseFloat(speedRange.value);
+            const inputFormat = formatSelect.value;
+
+            addLog(`发送请求: voice=${voice}, speed=${speed}, format=${inputFormat}`, 'info');
+            addLog(`文本: ${text.substring(0, 50)}...`, 'info');
+
+            const request = {
+                text: text,
+                voice: voice,
+                speed: speed,
+                input_format: inputFormat
+            };
+
+            ws.send(JSON.stringify(request));
+
+            isGenerating = true;
+            generateBtn.textContent = '生成中...';
+            generateBtn.classList.add('generating');
+        });
+
+        // 更新连接状态
+        function updateStatus(connected) {
+            if (connected) {
+                statusDiv.className = 'status connected';
+                statusDiv.textContent = '已连接';
+            } else {
+                statusDiv.className = 'status disconnected';
+                statusDiv.textContent = '未连接';
+            }
+        }
+
+        // 页面加载时
+        addLog('WebSocket TTS 测试工具已就绪', 'info');
+        addLog('点击"连接"按钮开始使用', 'info');
+    </script>
+</body>
+</html>
