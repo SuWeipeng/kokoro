@@ -222,9 +222,9 @@ def convert_audio_to_target_format(audio_bytes: bytes, target_sample_rate: int =
                 temp_wav_path = temp_wav.name
                 temp_wav.close()
                 
-                # 使用 soundfile 写入 WAV，指定正确的参数
-                # soundfile 默认将 float 数据视为归一化浮点数，范围 [-1, 1]
-                sf.write(temp_wav_path, audio_array, source_sr, format='WAV', subtype='PCM_16')
+                # 使用 soundfile 写入 WAV
+                # soundfile 默认将 float 数据视为归一化浮点数，范围 [-1, 1]，使用 FLOAT subtype
+                sf.write(temp_wav_path, audio_array, source_sr, format='WAV', subtype='FLOAT')
                 
                 # 使用 ffmpeg 转换为 MP3
                 temp_mp3 = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
