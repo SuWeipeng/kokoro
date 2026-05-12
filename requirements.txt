@@ -21,6 +21,7 @@ torchaudio>=2.0.0
 # Audio Processing
 soundfile>=0.12.0
 numpy>=1.24.0
+pydub>=0.25.1  # For MP3 encoding fallback when soundfile doesn't support MP3
 
 # WebSocket client (for testing)
 websockets>=12.0

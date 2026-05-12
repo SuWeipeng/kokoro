@@ -203,14 +203,73 @@ def convert_audio_to_target_format(audio_bytes: bytes, target_sample_rate: int =
         sf.write(buffer, audio_array, target_sample_rate, format='WAV')
         media_type = "audio/wav"
     elif target_format.lower() in ["mp3", "mpeg"]:
-        # 尝试使用 mp3 格式
+        # 尝试使用 soundfile 编码 MP3
+        mp3_success = False
         try:
             sf.write(buffer, audio_array, target_sample_rate, format='MP3')
             media_type = "audio/mpeg"
-        except Exception:
-            # 如果 MP3 不支持，回退到 WAV
-            sf.write(buffer, audio_array, target_sample_rate, format='WAV')
-            media_type = "audio/wav"
+            mp3_success = True
+        except Exception as e:
+            print(f"soundfile MP3 encoding failed: {e}, trying ffmpeg...")
+        
+        # 如果 soundfile 不支持 MP3，使用 ffmpeg 命令转换
+        if not mp3_success:
+            try:
+                import subprocess
+                
+                # 先将音频数据写入临时 WAV 文件
+                temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                temp_wav_path = temp_wav.name
+                temp_wav.close()
+                
+                # 使用重采样后的采样率（audio_array 已经被 resample 到 target_sample_rate）
+                write_sr = target_sample_rate if source_sr != target_sample_rate else source_sr
+                # soundfile 默认将 float 数据视为归一化浮点数，范围 [-1, 1]
+                sf.write(temp_wav_path, audio_array, write_sr, format='WAV', subtype='FLOAT')
+                
+                # 使用 ffmpeg 转换为 MP3（不改变采样率）
+                temp_mp3 = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                temp_mp3_path = temp_mp3.name
+                temp_mp3.close()
+                
+                cmd = [
+                    'ffmpeg', '-y', '-i', temp_wav_path,
+                    '-acodec', 'libmp3lame',
+                    '-b:a', '64k',
+                    temp_mp3_path
+                ]
+                
+                subprocess.run(cmd, capture_output=True, check=True)
+                
+                # 读取 MP3 数据
+                with open(temp_mp3_path, 'rb') as f:
+                    audio_bytes = f.read()
+                
+                buffer = io.BytesIO(audio_bytes)
+                media_type = "audio/mpeg"
+                print(f"ffmpeg MP3 encoding successful")
+                
+                # 清理临时文件
+                os.unlink(temp_wav_path)
+                os.unlink(temp_mp3_path)
+                
+            except FileNotFoundError:
+                print("ffmpeg not installed, falling back to WAV")
+                sf.write(buffer, audio_array, target_sample_rate, format='WAV')
+                media_type = "audio/wav"
+            except Exception as e:
+                print(f"ffmpeg MP3 encoding failed: {e}, falling back to WAV")
+                sf.write(buffer, audio_array, target_sample_rate, format='WAV')
+                media_type = "audio/wav"
+                # 清理可能的临时文件
+                try:
+                    os.unlink(temp_wav_path)
+                except:
+                    pass
+                try:
+                    os.unlink(temp_mp3_path)
+                except:
+                    pass
     else:
         # 默认使用 WAV
         sf.write(buffer, audio_array, target_sample_rate, format='WAV')
