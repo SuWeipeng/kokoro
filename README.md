@@ -1,19 +1,19 @@
-# Kokoro TTS API
+# MeloTTS API
 
-基于 **Kokoro TTS** 模型的语音合成API服务，提供OpenAI兼容接口和WebSocket实时流式传输。
+基于 **MeloTTS** 模型的语音合成API服务，提供OpenAI兼容接口和WebSocket实时流式传输。
 
 ## 功能特性
 
-- ✅ **文本转语音 (TTS)**：支持中文和英文文本合成
-- ✅ **多种音色**：8种预置音色（4女声、2男声、2双语声）
+- ✅ **文本转语音 (TTS)**：支持中文、英文及中英文混合文本合成
+- ✅ **智能音色选择**：中文文本自动使用 ZH 模型，英文文本自动使用 EN 模型
+- ✅ **中英双语音色**：alloy 音色始终使用 ZH 模型，完美支持中英文混合朗读
+- ✅ **多英文口音**：支持美式、英式、澳大利亚等多种英文口音
 - ✅ **OpenAI兼容接口**：标准 `/v1/audio/speech` 接口
 - ✅ **传统接口**：GET `/tts` 和 POST `/tts_post`
-- ✅ **WebSocket流式接口**：实时流式音频传输，支持长文本分句处理
-- ✅ **智能文本处理**：数字转换、电话号码、IP地址处理
-- ✅ **双语音色**：支持中英文混合文本自动切换
+- ✅ **WebSocket流式接口**：句子级流式音频传输，支持长文本分句处理
 - ✅ **Markdown支持**：自动清洗Markdown格式，删除代码块和公式
 - ✅ **特殊符号处理**：数学符号（×÷=≠）、单位符号（%℃℉）、货币符号
-- ✅ **智能音色选择**：中文文本自动切换到双语音色
+- ✅ **智能文本处理**：Markdown 清洗、特殊符号转换
 
 ## 快速开始
 
@@ -61,24 +61,39 @@ curl -X POST "http://localhost:9880/v1/audio/speech" \
 
 ## 音色列表
 
-| OpenAI名称 | Kokoro音色文件 | 类型 | 说明 |
-|-----------|---------------|------|------|
-| alloy | bf_vale.pt | 双语声 | ✅ 中英文自动切换 |
-| echo | am_adam.pt | 男声 | 英文 |
-| fable | af_sol.pt | 女声(双语) | ✅ 中英文自动切换 |
-| onyx | am_michael.pt | 男声 | 英文 |
-| nova | af_sarah.pt | 女声 | 英文 |
-| shimmer | af_maple.pt | 女声(双语) | ✅ 中英文自动切换 |
+### 音色映射表
 
-**额外可用的音色**（直接使用Kokoro名称）：
-- `af_heart` - 女声
-- `af_nicole` - 女声
-- `af_sarah` - 女声
-- `am_adam` - 男声
-- `am_michael` - 男声
-- `af_maple` - 双语声（推荐用于中英文混合）
-- `af_sol` - 双语声（推荐用于中英文混合）
-- `bf_vale` - 双语声（推荐用于中英文混合）
+| OpenAI名称 | MeloTTS 模型 | Speaker ID | 说明 |
+|-----------|-------------|-----------|------|
+| **alloy** | ZH | 1 | 🌟 **中英双语** - 始终使用 ZH 模型，完美支持中英文混合 |
+| echo | EN | EN-US (0) | 美式英语 |
+| fable | EN | EN-BR (1) | 英式英语（巴西/英国变体） |
+| onyx | EN | EN-Default (4) | 默认英语口音 |
+| nova | EN | EN-US (0) | 美式英语 |
+| shimmer | EN | EN-AU (3) | 澳大利亚英语 |
+
+### 智能音色选择
+
+API 会根据输入文本自动选择最佳模型：
+
+- **中文文本** → 自动使用 ZH 模型（speaker_id=1）
+- **英文文本** → 自动使用 EN 模型，根据选择的音色使用对应口音
+- **alloy 音色** → 始终使用 ZH 模型（无论中英文）
+
+### 英文口音说明
+
+| 口音 | 音色 | 特点 |
+|------|------|------|
+| 美式英语 (EN-US) | echo, nova | 美国通用口音 |
+| 英式英语 (EN-BR) | fable | 英国/巴西变体 |
+| 澳大利亚英语 (EN-AU) | shimmer | 澳大利亚口音 |
+| 默认英语 (EN-Default) | onyx | 标准英语口音 |
+
+### 使用建议
+
+- 如需**中英混合朗读**，请使用 `alloy` 音色
+- 如需**特定英文口音**，选择对应的音色名称
+- 如不确定，`onyx` 提供标准的默认英语口音
 
 ## API 接口
 
@@ -100,7 +115,7 @@ curl -X POST "http://localhost:9880/v1/audio/speech" \
 参数说明：
 - `model`: 模型名称（任意字符串，兼容OpenAI格式）
 - `input`: 要合成的文本
-- `voice`: 音色名称（支持OpenAI音色名或Kokoro音色名）
+- `voice`: 音色名称（支持OpenAI音色名，见上方音色列表）
 - `response_format`: 音频格式（wav/mp3，默认wav）
 - `speed`: 语速（0.25-4.0，默认1.0）
 - `input_format`: 输入格式（可选）
@@ -109,7 +124,7 @@ curl -X POST "http://localhost:9880/v1/audio/speech" \
 
 ### 传统 GET 接口
 
-**GET** `/tts?text=你好&voice=af_heart&speed=1.0`
+**GET** `/tts?text=你好&voice=alloy&speed=1.0`
 
 ### 传统 POST 接口
 
@@ -118,13 +133,13 @@ curl -X POST "http://localhost:9880/v1/audio/speech" \
 ```json
 {
   "text": "你好世界",
-  "voice": "af_heart",
+  "voice": "alloy",
   "speed": 1.0,
   "input_format": "plain"
 }
 ```
 
-### WebSocket 流式接口 ⭐ NEW
+### WebSocket 流式接口
 
 **WebSocket** `/ws/tts`
 
@@ -137,7 +152,7 @@ ws://localhost:9880/ws/tts
 ```json
 {
   "text": "你好，这是一个WebSocket测试。",
-  "voice": "af_heart",
+  "voice": "alloy",
   "speed": 1.0,
   "input_format": "plain"
 }
@@ -161,7 +176,6 @@ ws://localhost:9880/ws/tts
 - 更低的延迟，开始播放更快
 - 内存占用更小
 - 支持长文本实时合成（自动分句处理）
-- 智能音色选择（中文自动切换双语音色）
 - 适合连续对话场景
 
 ## 测试工具
@@ -214,7 +228,7 @@ import json
 import io
 import soundfile as sf
 
-async def stream_tts(text, voice="af_heart", speed=1.0):
+async def stream_tts(text, voice="alloy", speed=1.0):
     uri = "ws://localhost:9880/ws/tts"
 
     async with websockets.connect(uri) as ws:
@@ -261,7 +275,7 @@ ws.onopen = () => {
     // 发送请求
     ws.send(JSON.stringify({
         text: "你好，这是一个测试。",
-        voice: "af_heart",
+        voice: "alloy",
         speed: 1.0
     }));
 };
@@ -300,21 +314,28 @@ uvicorn api:api --host 0.0.0.0 --port <新端口> --reload
 
 ### 音频格式
 
-- 采样率：24000 Hz
-- 格式：WAV (PCM 16-bit)
+- 采样率：24000 Hz（输出时自动从 44100Hz 重采样）
+- 格式：WAV (PCM 16-bit) 或 MP3
 - 比特率：自动
+
+### 双模型架构
+
+服务启动后会自动加载两个 MeloTTS 模型：
+
+1. **ZH 模型**：处理中文和中英混合文本
+2. **EN 模型**：处理英文文本，支持多种口音
+
+模型采用懒加载方式，在第一次请求时自动加载，无需等待启动。
 
 ## 智能文本处理
 
 API会自动处理以下情况：
 
-1. **数字转文字**：`123` → `一百二十三`
-2. **电话号码**：`138-1234-5678` → `一三八一二三四五六七八`
-3. **IP地址**：`192.168.1.1` → `一百九十二点一百六十八点一点一`
-4. **中英文判断**：自动检测文本类型，选择合适的处理方式
-5. **数字范围**：`1-10` → `1到10`
+1. **Markdown 清洗**：自动去除格式符号
+2. **特殊符号处理**：数学符号、单位符号、货币符号转换
+3. **中英文混合**：MeloTTS ZH 模型天然支持中英文混合朗读
 
-### Markdown 格式支持 ⭐ NEW
+### Markdown 格式支持
 
 设置 `input_format: "markdown"` 后，API会自动清洗Markdown格式：
 
@@ -337,7 +358,7 @@ curl -X POST "http://localhost:9880/v1/audio/speech" \
   --output output.wav
 ```
 
-### 特殊符号处理 ⭐ NEW
+### 特殊符号处理
 
 自动将特殊符号转换为可朗读的文字：
 
@@ -358,14 +379,6 @@ curl -X POST "http://localhost:9880/v1/audio/speech" \
 - `₽1000` → `1000卢布`
 - `₹500` → `500卢比`
 - `₩10000` → `10000韩元`
-
-### 智能音色选择 ⭐ NEW
-
-当检测到文本包含中文时，会自动切换到双语音色：
-
-- 用户指定 `am_adam` (男声) + 中文文本 → 自动使用 `af_maple` (双语音色)
-- 避免用纯英文音色朗读中文导致效果差
-- 服务器日志会记录音色调整信息
 
 ## 常见问题
 
@@ -389,38 +402,41 @@ curl -X POST "http://localhost:9880/v1/audio/speech" \
 
 ### 4. 中英文混合问题
 
-- 使用双语音色：`af_maple`, `af_sol`, `bf_vale`
-- 这些音色使用语言代码 `'z'`，可以智能处理中英文混合文本
+- 使用 `alloy` 音色可完美支持中英文混合朗读
+- 中文文本会自动使用 ZH 模型
+- 英文文本会自动使用 EN 模型并选择对应口音
+
+### 5. 英文口音不一致问题
+
+- 确保使用正确的音色名称
+- echo/nova = 美式英语
+- fable = 英式英语
+- shimmer = 澳大利亚英语
+- onyx = 默认英语口音
 
 ## 性能优化建议
 
-1. **使用双语音色**：中英文混合文本使用 `af_maple` 等双语音色
-2. **WebSocket流式**：长文本使用WebSocket接口，实时性更好
-3. **并发控制**：建议同时请求数不超过5个
-4. **缓存音频**：常用短语可以缓存音频文件
+1. **WebSocket流式**：长文本使用WebSocket接口，实时性更好
+2. **并发控制**：建议同时请求数不超过5个
+3. **缓存音频**：常用短语可以缓存音频文件
 
 ## 文件说明
 
 ```
 kokoro/
 ├── api.py                      # 主API文件
-├── markdown_cleaner.py         # Markdown清洗模块 ⭐ NEW
-├── sentence_splitter.py        # 句子分割模块 ⭐ NEW
-├── en_replace_number.py        # 数字和特殊符号处理
+├── markdown_cleaner.py         # Markdown清洗模块
+├── sentence_splitter.py        # 句子分割模块
+├── en_replace_number.py        # 特殊符号处理
 ├── start_service.bat           # Windows启动脚本
 ├── start_service.vbs           # 后台启动脚本
 ├── requirements.txt            # Python依赖
 ├── test_websocket_simple.py    # WebSocket简单测试
 ├── test_websocket_audio.py     # WebSocket音频测试
-├── test_markdown_tts.py        # Markdown TTS测试 ⭐ NEW
+├── test_markdown_tts.py        # Markdown TTS测试
 ├── test_websocket.html         # 浏览器测试页面
-├── models_zh/                  # 模型文件目录
-│   ├── config.json
-│   └── kokoro-v1_1-zh.pth
-└── voices/                     # 音色文件目录
-    ├── af_heart.pt
-    ├── am_adam.pt
-    └── ...
+└── MeloTTS/                    # MeloTTS 源码目录
+    └── test_melo.py            # MeloTTS 测试示例
 ```
 
 ## 技术栈
@@ -428,13 +444,13 @@ kokoro/
 - **Web框架**: FastAPI
 - **ASGI服务器**: Uvicorn
 - **深度学习**: PyTorch
-- **TTS模型**: Kokoro
+- **TTS模型**: MeloTTS (MIT & MyShell.ai)
 - **音频处理**: SoundFile
 - **WebSocket**: FastAPI WebSocket
 
 ## 许可证
 
-本项目基于 Kokoro TTS 模型构建。请遵守相关模型的使用条款。
+本项目基于 MeloTTS 模型构建。MeloTTS 使用 MIT 许可证。
 
 ## 支持
 
@@ -445,7 +461,22 @@ kokoro/
 
 ## 更新日志
 
-### v1.2 (当前版本) ⭐ Markdown TTS
+### v2.1 (当前版本) ⭐ 智能音色选择
+- ✅ 新增双模型架构（ZH + EN）
+- ✅ 智能语言检测：中文文本自动使用 ZH 模型
+- ✅ 英文口音选择：英文文本自动使用 EN 模型并选择对应口音
+- ✅ alloy 音色升级为中英双语专用音色
+- ✅ 支持美式、英式、澳大利亚等多种英文口音
+- ✅ 修复 speaker_id 类型问题
+
+### v2.0
+- ✅ 迁移到 MeloTTS 模型
+- ✅ 统一使用 ZH 模型，天然支持中英文混合
+- ✅ 简化音色系统
+- ✅ 保留所有 API 接口兼容性
+- ✅ 句子级 WebSocket 流式传输
+
+### v1.2
 - ✅ 新增 Markdown 格式支持（自动清洗格式符号）
 - ✅ 新增特殊符号处理（数学、单位、货币符号）
 - ✅ 新增智能音色选择（中文自动切换双语音色）

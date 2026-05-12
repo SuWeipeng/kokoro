@@ -1,136 +1,70 @@
 from fastapi import FastAPI, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from kokoro.pipeline import KPipeline
-from kokoro.model import KModel
+from melo.api import TTS
 from pydantic import BaseModel
-from en_replace_number import NumberReplacer, SpecialSymbolProcessor
+from en_replace_number import SpecialSymbolProcessor
 from markdown_cleaner import MarkdownCleaner
 from sentence_splitter import SentenceSplitter
 import os
 import torch
-import tqdm
 import soundfile as sf
 import numpy as np
 import io
+import scipy.signal
 from typing import Literal, Optional
 import tempfile
 import uuid
 import re
 import asyncio
 import json
-from collections import deque
 import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-repo_id='kokoro_api'
-
-# 在启动时添加检查
-def check_files():
-    required_files = [
-        os.path.join("models_zh", "config.json"),
-        os.path.join("models_zh", "kokoro-v1_1-zh.pth")
-    ]
-
-    for file_path in required_files:
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Required file not found: {file_path}")
-        print(f"Found: {file_path}")
-
-check_files()
-
-# 添加设备检查
+# 设备检查
 def check_device():
     if torch.cuda.is_available():
         print(f"CUDA available: {torch.cuda.get_device_name()}")
         print(f"CUDA version: {torch.version.cuda}")
-        return 'cuda'
+        return 'cuda:0'
     else:
         print("Using CPU")
         return 'cpu'
 
 device = check_device()
 
-try:
-    kmodel = KModel(
-        config=os.path.join("models_zh", "config.json"),
-        model=os.path.join("models_zh", "kokoro-v1_1-zh.pth"),
-        repo_id=repo_id
-    ).to(device).eval()
-except Exception as e:
-    print(f"Model loading error: {e}")
-    raise RuntimeError(f"Failed to load model: {e}")
+# MeloTTS 模型单例（中文和英文分别加载）
+tts_models = {}  # {language: TTS instance}
+speaker_ids_map = {}  # {language: {speaker_name: speaker_id}}
 
-# 多语言 pipeline 缓存
-lang_pipelines = {}
-
-en_pipeline = KPipeline(lang_code='a', repo_id=repo_id, model=False)
-def en_callable(text):
-    if text == 'Kokoro':
-        return 'kˈOkəɹO'
-    elif text == 'Sol':
-        return 'sˈOl'
-    return next(en_pipeline(text)).phonemes
-
-def get_pipeline(lang_code):
-    if lang_code in lang_pipelines:
-        return lang_pipelines[lang_code]
-    pipe = KPipeline(lang_code=lang_code, model=kmodel, repo_id=repo_id, en_callable=en_callable)
-    lang_pipelines[lang_code] = pipe
-    return pipe
-
-# Queue management for TTS requests
-class TTSQueueManager:
-    """Manages TTS request queue to prevent concurrent access conflicts"""
-    def __init__(self):
-        self.queue = deque()
-        self.processing = False
-        self.max_queue_size = 100
-        self.lock = asyncio.Lock()
-
-    async def add_request(self, request_data: dict) -> bool:
-        """Add a request to the queue"""
-        async with self.lock:
-            if len(self.queue) >= self.max_queue_size:
-                logger.warning("Queue is full, rejecting request")
-                return False
-            self.queue.append(request_data)
-            logger.info(f"Request added to queue. Queue size: {len(self.queue)}")
-            return True
-
-    async def get_next_request(self) -> Optional[dict]:
-        """Get the next request from the queue"""
-        async with self.lock:
-            if self.queue:
-                return self.queue.popleft()
-            return None
-
-    async def process_queue(self):
-        """Process requests in the queue"""
-        while True:
-            request = await self.get_next_request()
-            if request:
-                self.processing = True
-                try:
-                    # Process the request - this will be handled by the WebSocket handler
-                    yield request
-                finally:
-                    self.processing = False
+def load_melo_model(language='ZH'):
+    """延迟加载 MeloTTS 模型（支持 ZH 和 EN）"""
+    if language not in tts_models:
+        print(f"Loading MeloTTS model ({language})...")
+        try:
+            # 使用 device 参数直接指定设备，避免 meta 张量问题
+            tts_models[language] = TTS(language=language, device=device)
+            speaker_ids_map[language] = dict(tts_models[language].hps.data.spk2id)
+            print(f"MeloTTS {language} model loaded. Speaker IDs: {speaker_ids_map[language]}")
+        except NotImplementedError as e:
+            if "meta tensor" in str(e):
+                print(f"尝试重新加载 {language} 模型，使用设备重置...")
+                # 清理 CUDA 缓存后重试
+                if 'cuda' in device:
+                    torch.cuda.empty_cache()
+                    torch.cuda.reset_peak_memory_stats()
+                tts_models[language] = TTS(language=language, device=device)
+                speaker_ids_map[language] = dict(tts_models[language].hps.data.spk2id)
+                print(f"MeloTTS {language} model loaded (retry). Speaker IDs: {speaker_ids_map[language]}")
             else:
-                await asyncio.sleep(0.1)
-
-    def get_queue_size(self) -> int:
-        """Get current queue size"""
-        return len(self.queue)
-
-# Global queue manager
-queue_manager = TTSQueueManager()
+                raise
+    return tts_models[language], speaker_ids_map[language]
 
 # 创建 FastAPI 应用
-api = FastAPI(title="Kokoro TTS API with OpenAI Compatibility")
+api = FastAPI(title="MeloTTS API with OpenAI Compatibility")
 
 api.add_middleware(
     CORSMiddleware,
@@ -140,223 +74,267 @@ api.add_middleware(
     allow_headers=["*"],
 )
 
-replacer = NumberReplacer()
-
-# 新增全局实例：Markdown 清洗、句子分割、特殊符号处理
+# 全局实例：Markdown 清洗、句子分割、特殊符号处理
 markdown_cleaner = MarkdownCleaner()
 sentence_splitter = SentenceSplitter()
 symbol_processor = SpecialSymbolProcessor()
 
-# 定义 Kokoro 声音到 OpenAI 风格的映射
-VOICE_MAPPING = {
-    # OpenAI voices -> Kokoro voices
-    "alloy": "bf_vale",
-    "echo": "am_adam", 
-    "fable": "af_sol",
-    "onyx": "am_michael",
-    "nova": "af_sarah",
-    "shimmer": "af_maple",
+# MeloTTS speaker_id 映射
+# 中文音色和英文音色的映射关系
+# 注意：alloy 是双语音色，始终使用 ZH 模型
+SPEAKER_MAPPING = {
+    # 双语音色（始终使用 ZH 模型）
+    "alloy": "BILINGUAL",  # 中英双语
     
-    # Extension voice names -> Kokoro voices (based on the extension docs)
-    "am_adam": "am_adam",      # Adam (Alloy)
-    "af_nicole": "af_nicole",  # Nicole (Ash) 
-    "bf_emma": "bf_vale",      # Emma (Coral) - mapped to bf_vale
-    "af_bella": "af_heart",    # Bella (Echo) - mapped to af_heart
-    "af_sarah": "af_sarah",    # Sarah (Fable)
-    "bm_george": "am_michael", # George (Onyx) - mapped to am_michael
-    "bf_isabella": "bf_vale",  # Isabella (Nova) - mapped to bf_vale
-    "am_michael": "am_michael", # Michael (Sage)
-    "af_sky": "af_maple",      # Sky (Shimmer) - mapped to af_maple
-    
-    # Keep original Kokoro voices for backward compatibility
-    "af_heart": "af_heart",
-    "af_maple": "af_maple", 
-    "af_sol": "af_sol",
-    "bf_vale": "bf_vale",
-    "am_adam": "am_adam",
-    "am_michael": "am_michael",
-    "af_nicole": "af_nicole",
-    "af_sarah": "af_sarah",
+    # 英文音色（根据口音选择）
+    "echo": "EN-US",         # 美式英语
+    "fable": "EN-BR",        # 英式英语
+    "onyx": "EN-Default",    # 默认英语
+    "nova": "EN-US",         # 美式英语
+    "shimmer": "EN-AU",      # 澳大利亚英语
 }
 
-def _is_chinese_dominant(text: str) -> bool:
-    """检查文本中中文字符是否超过60%"""
+# 英文口音映射
+EN_ACCENT_MAPPING = {
+    "EN-US": "EN-US",    # 美式英语
+    "EN-BR": "EN-BR",    # 英式英语
+    "EN_INDIA": "EN_INDIA",  # 印度英语
+    "EN-AU": "EN-AU",    # 澳大利亚英语
+    "EN-Default": "EN-Default",  # 默认英语
+}
+
+def detect_language(text: str) -> str:
+    """
+    检测文本语言
+    如果包含中文字符返回 'ZH'，否则返回 'EN'
+    """
     if not text:
-        return False
-
-    chinese_count = 0
-    total_chars = len(text)
-
+        return 'EN'
+    
+    # 检查中文字符
     for char in text:
-        # 检查是否为中文字符（包括中文标点符号）
-        if '\u4e00' <= char <= '\u9fff' or '\u3000' <= char <= '\u303f' or '\uff00' <= char <= '\uffef':
-            chinese_count += 1
+        if '\u4e00' <= char <= '\u9fff':
+            return 'ZH'
+    
+    return 'EN'
 
-    res = chinese_count / total_chars
-
-    #print(res)
-
-    return res > 0.35
-
-def _replace_range_symbols(text: str) -> str:
-    """将数字之间的-或~替换为'到'"""
-    # 匹配数字-数字或数字~数字的模式
-    pattern = r'(\d+)\s*[-~]\s*(\d+)'
-
-    def replace_func(match):
-        return f"{match.group(1)}到{match.group(2)}"
-
-    return re.sub(pattern, replace_func, text)
-
-def get_optimal_voice(user_voice: str, text: str) -> str:
+def get_speaker_and_model(voice: str, text: str) -> tuple:
     """
-    根据文本语言选择最佳音色
-
-    中文文本自动切换到双语音色，避免用纯英文音色读中文效果差。
-
-    Args:
-        user_voice: 用户指定的音色
-        text: 要处理的文本
-
+    根据音色和文本语言获取对应的 MeloTTS 模型和 speaker_id
+    
+    双语音色（alloy）始终使用 ZH 模型，支持中英文混合文本。
+    
     Returns:
-        最佳音色名称
+        (model, speaker_id, language) 元组
     """
-    # 双语音色列表（支持中英混合）
-    bilingual_voices = ['af_maple', 'af_sol', 'bf_vale']
-
-    # 检测文本是否包含中文
-    has_chinese = any('\u4e00' <= c <= '\u9fff' for c in text)
-
-    if has_chinese and user_voice not in bilingual_voices:
-        # 中文文本自动切换到默认双语音色
-        logger.info(f"音色自动调整: {user_voice} → af_maple (文本包含中文)")
-        return 'af_maple'
-
-    return user_voice
-
-def process_text(text: str, input_format: str = "plain") -> str:
-    """
-    处理输入文本
-
-    处理流程:
-        1. 清洗 Markdown 格式 (如果 input_format="markdown")
-        2. 特殊符号处理
-        3. 现有数字处理逻辑
-
-    Args:
-        text: 输入文本
-        input_format: "plain" (纯文本) 或 "markdown" (Markdown格式)
-
-    Returns:
-        处理后的文本
-    """
-    # 1. 清洗 Markdown 格式（先清洗，再检测语言）
-    if input_format == "markdown":
-        text = markdown_cleaner.clean(text)
-
-    # 2. 特殊符号处理
-    text = symbol_processor.process(text)
-
-    # 3. 现有数字处理逻辑
-    if _is_chinese_dominant(text):
-        # 如果中文字符超过35%，只处理数字范围符号
-        text = _replace_range_symbols(text)
+    # 检测文本语言
+    language = detect_language(text)
+    
+    # 检查是否是双语音色
+    if SPEAKER_MAPPING.get(voice) == "BILINGUAL":
+        # 双语音色始终使用 ZH 模型
+        model, speaker_ids = load_melo_model('ZH')
+        speaker_id = speaker_ids.get('ZH', 1)
+        return model, speaker_id, 'ZH'
+    
+    # 根据语言选择 speaker
+    if language == 'ZH':
+        speaker_name = 'ZH'
+        model, speaker_ids = load_melo_model('ZH')
     else:
-        # 如果中文字符不超过35%，则进行原有的处理
-        text = replacer.replace_phone_numbers_with_words(text)
-        text = replacer.replace_ip_addresses_with_words(text)
-        text = replacer.clean_numbers_in_text(text)
-        text = replacer.replace_numbers_with_words(text, year_mode=True)
-        text = replacer.replace_list_number_with_words(text)
+        # 英文文本使用英文音色
+        speaker_name = SPEAKER_MAPPING.get(voice, "EN-Default")
+        model, speaker_ids = load_melo_model('EN')
+    
+    speaker_id = speaker_ids.get(speaker_name, 'ZH' if language == 'ZH' else 'EN-Default')
+    
+    return model, speaker_id, language
 
-    return text
+def audio_file_to_bytes(file_path: str) -> bytes:
+    """从文件读取 WAV 数据为 bytes"""
+    with open(file_path, 'rb') as f:
+        return f.read()
 
-def get_lang_code(voice: str) -> str:
-    """根据声音获取语言代码"""
-    bilingual_voice = ['af_maple', 'af_sol', 'bf_vale']
-    if voice in bilingual_voice:
-        return 'z'
-    else:
-        return voice[0]
-
-def audio_to_wav_bytes(audio_array: np.ndarray) -> bytes:
-    """将numpy数组转换为WAV字节"""
+def audio_to_wav_bytes(audio_array: np.ndarray, sample_rate: int = 24000) -> bytes:
+    """将numpy数组转换为WAV字节（保留用于兼容性）"""
     buffer = io.BytesIO()
-    sf.write(buffer, audio_array, 24000, format='WAV')
+    sf.write(buffer, audio_array, sample_rate, format='WAV')
     buffer.seek(0)
     return buffer.read()
 
-async def generate_audio_stream(text: str, voice: str, speed: float = 1.0, skip_processing: bool = False):
+def convert_audio_to_target_format(audio_bytes: bytes, target_sample_rate: int = 24000, target_format: str = "wav") -> tuple:
+    """
+    将音频数据转换为目标格式和采样率
+    
+    Args:
+        audio_bytes: 原始音频字节数据
+        target_sample_rate: 目标采样率
+        target_format: 目标格式 ("wav" 或 "mp3")
+    
+    Returns:
+        (audio_bytes, media_type) 元组
+    """
+    # 读取音频数据
+    audio_array, source_sr = sf.read(io.BytesIO(audio_bytes))
+    
+    # 如果采样率不同，进行重采样
+    if source_sr != target_sample_rate:
+        # 计算重采样后的长度
+        ratio = target_sample_rate / source_sr
+        new_length = int(len(audio_array) * ratio)
+        audio_array = scipy.signal.resample(audio_array, new_length)
+    
+    # 转换为指定格式
+    buffer = io.BytesIO()
+    if target_format.lower() in ["wav", "wave"]:
+        sf.write(buffer, audio_array, target_sample_rate, format='WAV')
+        media_type = "audio/wav"
+    elif target_format.lower() in ["mp3", "mpeg"]:
+        # 尝试使用 mp3 格式
+        try:
+            sf.write(buffer, audio_array, target_sample_rate, format='MP3')
+            media_type = "audio/mpeg"
+        except Exception:
+            # 如果 MP3 不支持，回退到 WAV
+            sf.write(buffer, audio_array, target_sample_rate, format='WAV')
+            media_type = "audio/wav"
+    else:
+        # 默认使用 WAV
+        sf.write(buffer, audio_array, target_sample_rate, format='WAV')
+        media_type = "audio/wav"
+    
+    buffer.seek(0)
+    return buffer.read(), media_type
+
+async def generate_audio_stream(text: str, speaker: str = "ZH", speed: float = 1.0, skip_processing: bool = False):
     """
     流式生成音频数据，用于WebSocket传输
-
+    
+    由于 MeloTTS 不支持真正的流式输出，采用句子级流式：
+    1. 将文本分句
+    2. 对每句调用 tts_to_file 生成完整音频
+    3. 生成完成后立即发送该句音频
+    
     Args:
         text: 输入文本
-        voice: 音色
+        speaker: MeloTTS speaker_id
         speed: 语速
         skip_processing: 是否跳过文本处理（如果文本已经处理过）
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
-
+    
     # 处理文本（如果需要）
     processed_text = text if skip_processing else process_text(text)
+    
+    # 检测语言并加载对应模型
+    language = detect_language(processed_text)
+    model, spk_ids = load_melo_model(language)
+    # speaker 已经是整数 speaker_id（由 get_speaker_and_model 返回）
+    speaker_id = int(speaker)
+    
+    # 分句处理
+    sentences = sentence_splitter.split(processed_text)
+    logger.info(f"Split into {len(sentences)} sentences")
+    
+    if not sentences:
+        raise HTTPException(status_code=400, detail="No sentences found after processing")
+    
+    # 逐句生成并发送
+    total_chunks = 0
+    total_bytes = 0
+    
+    for idx, sentence in enumerate(sentences):
+        # 创建临时文件
+        temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        temp_path = temp_file.name
+        temp_file.close()
+        
+        try:
+            # 生成音频到文件
+            model.tts_to_file(sentence, speaker_id, temp_path, speed=speed)
+            logger.info(f"Generated sentence {idx}: {sentence[:50]}...")
+            
+            # 读取文件数据
+            audio_bytes = audio_file_to_bytes(temp_path)
+            total_chunks += 1
+            total_bytes += len(audio_bytes)
+            
+            # 发送句子开始标记
+            yield {
+                "type": "sentence_start",
+                "index": idx,
+                "text": sentence,
+                "voice": speaker
+            }, audio_bytes
+            
+            # 发送句子结束标记
+            yield {
+                "type": "sentence_end",
+                "index": idx
+            }, None
+            
+        finally:
+            # 清理临时文件
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+    
+    # 发送完成标记
+    yield {
+        "type": "done",
+        "total_sentences": len(sentences),
+        "total_chunks": total_chunks,
+        "total_bytes": total_bytes
+    }, None
 
-    # 获取语言代码
-    lang_code = get_lang_code(voice)
-
-    # 获取对应语言的 pipeline
-    try:
-        pipeline = get_pipeline(lang_code)
-    except AssertionError:
-        raise HTTPException(status_code=400, detail=f"Unsupported lang_code: {lang_code}")
-
-    # 流式合成音频 - 逐句生成并发送
-    voice_path = os.path.join('voices', voice + '.pt')
-    chunk_count = 0
-    for _, _, audio in pipeline(text=processed_text, voice=voice_path, speed=speed):
-        if audio is not None:
-            chunk_count += 1
-            # 将每个chunk转换为WAV字节数据
-            audio_bytes = audio_to_wav_bytes(audio.cpu().numpy())
-            yield audio_bytes
-            logger.info(f"Generated audio chunk #{chunk_count}, size: {len(audio_bytes)} bytes")
-
-    logger.info(f"Audio generation complete. Total chunks: {chunk_count}")
-
-def generate_audio(text: str, voice: str, speed: float = 1.0, skip_processing: bool = False) -> np.ndarray:
+def generate_audio(text: str, speaker_id: int = 1, speed: float = 1.0, skip_processing: bool = False,
+                   target_format: str = "wav", target_sample_rate: int = 24000) -> tuple:
     """
     生成音频数据（完整版本）
-
+    
     Args:
         text: 输入文本
-        voice: 音色
+        speaker_id: MeloTTS speaker_id (整数)
         speed: 语速
         skip_processing: 是否跳过文本处理（如果文本已经处理过）
+        target_format: 目标格式 ("wav" 或 "mp3")
+        target_sample_rate: 目标采样率
+    
+    Returns:
+        (audio_bytes, media_type) 元组
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
-
+    
     # 处理文本（如果需要）
     processed_text = text if skip_processing else process_text(text)
-
-    # 获取语言代码
-    lang_code = get_lang_code(voice)
-
-    # 获取对应语言的 pipeline
+    
+    # 检测语言并加载对应模型
+    language = detect_language(processed_text)
+    model, spk_ids = load_melo_model(language)
+    
+    # 创建临时文件
+    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    temp_path = temp_file.name
+    temp_file.close()
+    
     try:
-        pipeline = get_pipeline(lang_code)
-    except AssertionError:
-        raise HTTPException(status_code=400, detail=f"Unsupported lang_code: {lang_code}")
-
-    # 合成音频
-    audios = []
-    for _, _, audio in pipeline(text=processed_text, voice=os.path.join('voices', voice + '.pt'), speed=speed):
-        if audio is not None:
-            audios.append(audio.cpu().numpy())
-
-    full_audio = np.concatenate(audios) if audios else np.array([], dtype=np.float32)
-    return full_audio
+        # 生成音频到文件（speaker_id 已经是整数）
+        model.tts_to_file(processed_text, speaker_id, temp_path, speed=speed)
+        logger.info(f"Generated audio for: {processed_text[:50]}...")
+        
+        # 读取文件数据并转换格式
+        audio_bytes = audio_file_to_bytes(temp_path)
+        return convert_audio_to_target_format(audio_bytes, target_sample_rate, target_format)
+        
+    finally:
+        # 清理临时文件
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
 
 # OpenAI 兼容的数据模型
 class OpenAITTSRequest(BaseModel):
@@ -369,7 +347,7 @@ class OpenAITTSRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
-    voice: str = "zf_001"
+    voice: str = "alloy"
     speed: float = 1.0
     input_format: Optional[str] = "plain"  # "plain" | "markdown"
 
@@ -377,64 +355,40 @@ class TTSRequest(BaseModel):
 @api.post("/v1/audio/speech")
 def create_speech(request: OpenAITTSRequest):
     try:
-        print(f"Received request: {request}")  # 添加日志
-
-        # 映射声音名称，如果不存在则使用默认声音
-        kokoro_voice = VOICE_MAPPING.get(request.voice, "af_heart")
-        print(f"Requested voice: {request.voice}, Using voice: {kokoro_voice}")  # 添加日志
-
+        print(f"Received request: {request}")
+        
+        # 根据文本语言智能选择模型和音色
+        model, speaker_id, language = get_speaker_and_model(request.voice, request.input)
+        print(f"Requested voice: {request.voice}, Language: {language}, Using speaker_id: {speaker_id}")
+        
         # Validate speed range
         if request.speed and (request.speed < 0.25 or request.speed > 4.0):
             raise HTTPException(status_code=400, detail="Speed must be between 0.25 and 4.0")
-
+        
         # 处理文本（支持 Markdown 清洗和特殊符号处理）
         input_format = request.input_format or "plain"
         processed_text = process_text(request.input, input_format)
         print(f"Processed text (input_format={input_format}): {processed_text[:100]}...")
-
-        # 智能选择音色
-        optimal_voice = get_optimal_voice(kokoro_voice, processed_text)
-        if optimal_voice != kokoro_voice:
-            print(f"Voice auto-adjusted: {kokoro_voice} → {optimal_voice}")
-
-        # 生成音频（文本已处理，跳过二次处理）
-        audio_data = generate_audio(
+        
+        # 生成音频（直接传入 speaker_id 整数）
+        response_format = (request.response_format or "wav").lower()
+        audio_bytes, media_type = generate_audio(
             text=processed_text,
-            voice=optimal_voice,
+            speaker_id=speaker_id,
             speed=request.speed or 1.0,
-            skip_processing=True
+            skip_processing=True,
+            target_format=response_format,
+            target_sample_rate=24000
         )
-
-        print(f"Generated audio length: {len(audio_data)}")  # 添加日志
-
-        if len(audio_data) == 0:
+        
+        print(f"Generated audio size: {len(audio_bytes)} bytes, format: {media_type}")
+        
+        if len(audio_bytes) == 0:
             raise HTTPException(status_code=500, detail="Generated audio is empty.")
-
-        # 创建内存中的音频文件
-        audio_buffer = io.BytesIO()
-
-        # 根据请求的格式返回音频
-        format_lower = (request.response_format or "mp3").lower()
-        if format_lower in ["wav"]:
-            sf.write(audio_buffer, audio_data, 24000, format='WAV')
-            media_type = "audio/wav"
-        elif format_lower in ["mp3"]:
-            # Note: soundfile might not support mp3 directly, so fallback to wav
-            try:
-                sf.write(audio_buffer, audio_data, 24000, format='mp3')
-                media_type = "audio/mp3"
-            except:
-                sf.write(audio_buffer, audio_data, 24000, format='WAV')
-                media_type = "audio/wav"
-        else:
-            # Default to WAV for any other format
-            sf.write(audio_buffer, audio_data, 24000, format='WAV')
-            media_type = "audio/wav"
-
-        audio_buffer.seek(0)
-
+        
+        # 返回音频
         return StreamingResponse(
-            io.BytesIO(audio_buffer.read()),
+            io.BytesIO(audio_bytes),
             media_type=media_type,
             headers={
                 "Content-Disposition": "inline",
@@ -442,35 +396,32 @@ def create_speech(request: OpenAITTSRequest):
                 "Access-Control-Allow-Origin": "*"
             }
         )
-
+    
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error in create_speech: {str(e)}")  # 添加详细错误日志
+        print(f"Error in create_speech: {str(e)}")
         import traceback
-        traceback.print_exc()  # 打印完整的错误堆栈
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Audio generation failed: {str(e)}")
 
 # 原有的 GET 接口
 @api.get("/tts")
 def tts_get(
     text: str = Query(..., description="要合成的文本内容"),
-    voice: str = Query("af_heart", description="参考音色名称，如 af_heart"),
+    voice: str = Query("alloy", description="音色名称"),
     speed: float = Query(1.0, description="语速调节，如 0.9 或 1.2")
 ):
-    audio_data = generate_audio(text, voice, speed)
-
-    if len(audio_data) > 0:
-        # 使用临时文件，避免路径问题
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-            sf.write(tmp_file.name, audio_data, 24000, format='WAV')
-            output_path = tmp_file.name
-
-        return FileResponse(
-            path=output_path,
-            media_type="audio/wav",
-            filename="output.wav",
-            background=lambda: os.unlink(output_path)  # 自动清理临时文件
+    # 根据文本语言智能选择模型
+    model, speaker_id, language = get_speaker_and_model(voice, text)
+    audio_bytes, media_type = generate_audio(text, speaker_id, speed, target_sample_rate=24000)
+    print(f"Voice: {voice}, Language: {language}, Speaker_id: {speaker_id}")
+    
+    if len(audio_bytes) > 0:
+        return StreamingResponse(
+            io.BytesIO(audio_bytes),
+            media_type=media_type,
+            headers={"Access-Control-Allow-Origin": "*"}
         )
     else:
         raise HTTPException(status_code=500, detail="Generated audio is empty.")
@@ -480,11 +431,11 @@ def tts_get(
 def tts_post(request: TTSRequest):
     """
     POST 接口：接收 JSON 格式的文本、音色、语速，生成 `.wav` 音频文件。
-
+    
     示例请求体：
     {
         "text": "你好世界",
-        "voice": "af_heart",
+        "voice": "alloy",
         "speed": 1.0,
         "input_format": "plain"  // 可选: "plain" 或 "markdown"
     }
@@ -492,21 +443,31 @@ def tts_post(request: TTSRequest):
     # 处理文本（支持 Markdown 清洗和特殊符号处理）
     input_format = request.input_format or "plain"
     processed_text = process_text(request.text, input_format)
-
-    # 智能选择音色
-    optimal_voice = get_optimal_voice(request.voice, processed_text)
-    if optimal_voice != request.voice:
-        print(f"Voice auto-adjusted: {request.voice} → {optimal_voice}")
-
-    audio_data = generate_audio(processed_text, optimal_voice, request.speed, skip_processing=True)
-
-    if len(audio_data) > 0:
-        # 写入临时 WAV 文件
-        output_path = f"output.wav"
-        sf.write(output_path, audio_data, 24000, format='WAV')
-
-        # 返回文件给客户端
-        return FileResponse(path=output_path, media_type="audio/wav", filename=output_path)
+    
+    # 根据文本语言智能选择模型和音色
+    model, speaker_id, language = get_speaker_and_model(request.voice, processed_text)
+    audio_bytes, media_type = generate_audio(processed_text, speaker_id, request.speed, skip_processing=True, target_sample_rate=24000)
+    print(f"Voice: {request.voice}, Language: {language}, Speaker_id: {speaker_id}")
+    
+    if len(audio_bytes) > 0:
+        # 根据格式确定文件扩展名
+        ext = "wav" if "wav" in media_type else "mp3"
+        
+        # 创建临时文件
+        temp_file = tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False)
+        temp_path = temp_file.name
+        temp_file.close()
+        
+        try:
+            with open(temp_path, 'wb') as f:
+                f.write(audio_bytes)
+            
+            # 返回文件给客户端
+            return FileResponse(path=temp_path, media_type=media_type, filename=f"output.{ext}",
+                              background=lambda: os.unlink(temp_path))
+        except:
+            os.unlink(temp_path)
+            raise
     else:
         raise HTTPException(status_code=500, detail="Generated audio is empty.")
 
@@ -515,15 +476,16 @@ def tts_post(request: TTSRequest):
 def list_voices():
     """
     返回可用的声音列表（OpenAI 兼容格式）
+    注意：MeloTTS 使用统一音色，支持中英文混合
     """
     return {
         "data": [
-            {"id": "alloy", "name": "Alloy", "description": "Female voice (af_heart)"},
-            {"id": "echo", "name": "Echo", "description": "Male voice (am_adam)"},
-            {"id": "fable", "name": "Fable", "description": "Female voice (af_nicole)"},
-            {"id": "onyx", "name": "Onyx", "description": "Male voice (am_michael)"},
-            {"id": "nova", "name": "Nova", "description": "Female voice (af_sarah)"},
-            {"id": "shimmer", "name": "Shimmer", "description": "Bilingual voice (af_maple)"},
+            {"id": "alloy", "name": "Alloy", "description": "🌏 Bilingual Chinese-English voice (中英双语)"},
+            {"id": "echo", "name": "Echo", "description": "English (US) voice"},
+            {"id": "fable", "name": "Fable", "description": "English (British) voice"},
+            {"id": "onyx", "name": "Onyx", "description": "English (Default) voice"},
+            {"id": "nova", "name": "Nova", "description": "English (US) voice"},
+            {"id": "shimmer", "name": "Shimmer", "description": "English (Australian) voice"},
         ]
     }
 
@@ -531,22 +493,23 @@ def list_voices():
 @api.get("/health")
 def health_check():
     """健康检查接口"""
-    return {"status": "healthy", "model_loaded": True}
+    model_status = "loaded" if tts_models else "not_loaded"
+    return {"status": "healthy", "model_loaded": True, "model_status": model_status}
 
 # WebSocket 流式 TTS 接口
 @api.websocket("/ws/tts")
 async def websocket_tts(websocket: WebSocket):
     """
     WebSocket 流式 TTS 接口，用于实时语音合成
-
+    
     请求格式：
     {
         "text": "要合成的文本",
-        "voice": "af_heart",     // 可选，默认 af_heart
-        "speed": 1.0,            // 可选，默认 1.0
+        "voice": "alloy",     // 可选，默认 alloy
+        "speed": 1.0,         // 可选，默认 1.0
         "input_format": "plain"  // 可选，"plain" 或 "markdown"
     }
-
+    
     响应格式：
     - JSON: {"type": "sentence_start", "index": 0, "text": "...", "voice": "..."}
     - 二进制数据：WAV 音频块
@@ -556,32 +519,32 @@ async def websocket_tts(websocket: WebSocket):
     """
     await websocket.accept()
     logger.info("WebSocket connection established")
-
+    
     try:
         while True:
             # 接收客户端发送的数据
             data = await websocket.receive_text()
             logger.info(f"Received WebSocket message: {data[:100]}...")
-
+            
             try:
                 # 解析JSON数据
                 request_data = json.loads(data)
                 text = request_data.get("text", "")
-                voice = request_data.get("voice", "af_heart")
+                voice = request_data.get("voice", "alloy")
                 speed = request_data.get("speed", 1.0)
                 input_format = request_data.get("input_format", "plain")
-
+                
                 if not text:
                     await websocket.send_json({
                         "type": "error",
                         "message": "Text cannot be empty"
                     })
                     continue
-
-                # 映射声音名称
-                kokoro_voice = VOICE_MAPPING.get(voice, voice)
-                logger.info(f"Processing TTS: voice={voice} -> {kokoro_voice}, speed={speed}, input_format={input_format}")
-
+                
+                # 根据文本语言智能选择模型
+                model, speaker, language = get_speaker_and_model(voice, text)
+                logger.info(f"Processing TTS: voice={voice}, language={language}, speaker={speaker}, speed={speed}, input_format={input_format}")
+                
                 # 验证语速范围
                 if speed < 0.25 or speed > 4.0:
                     await websocket.send_json({
@@ -589,57 +552,71 @@ async def websocket_tts(websocket: WebSocket):
                         "message": "Speed must be between 0.25 and 4.0"
                     })
                     continue
-
+                
                 # 处理文本（支持 Markdown 清洗和特殊符号处理）
                 processed_text = process_text(text, input_format)
-
+                
+                # speaker 已经是整数 speaker_id（由 get_speaker_and_model 返回）
+                speaker_id = int(speaker)
+                
                 # 分句处理
                 sentences = sentence_splitter.split(processed_text)
                 logger.info(f"Split into {len(sentences)} sentences")
-
+                
                 if not sentences:
                     await websocket.send_json({
                         "type": "error",
                         "message": "No sentences found after processing"
                     })
                     continue
-
+                
                 # 逐句生成并发送
                 total_chunks = 0
                 total_bytes = 0
-
+                
                 for idx, sentence in enumerate(sentences):
-                    # 每句独立选择音色
-                    optimal_voice = get_optimal_voice(kokoro_voice, sentence)
-                    if optimal_voice != kokoro_voice:
-                        logger.info(f"Sentence {idx}: voice adjusted {kokoro_voice} → {optimal_voice}")
-
                     # 发送句子开始标记
                     await websocket.send_json({
                         "type": "sentence_start",
                         "index": idx,
                         "text": sentence,
-                        "voice": optimal_voice
+                        "voice": speaker
                     })
-
-                    # 生成并发送音频（文本已处理，跳过二次处理）
-                    chunk_count = 0
-                    async for audio_chunk in generate_audio_stream(sentence, optimal_voice, speed, skip_processing=True):
-                        chunk_count += 1
+                    
+                    # 创建临时文件
+                    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                    temp_path = temp_file.name
+                    temp_file.close()
+                    
+                    try:
+                        # 生成音频到文件
+                        model.tts_to_file(sentence, speaker_id, temp_path, speed=speed)
+                        logger.info(f"Generated sentence {idx}: {sentence[:50]}...")
+                        
+                        # 读取文件数据
+                        audio_bytes = audio_file_to_bytes(temp_path)
                         total_chunks += 1
-                        total_bytes += len(audio_chunk)
-                        await websocket.send_bytes(audio_chunk)
+                        total_bytes += len(audio_bytes)
+                        
+                        # 发送音频数据
+                        await websocket.send_bytes(audio_bytes)
+                        
                         # 让出控制权，允许其他协程执行
                         await asyncio.sleep(0)
-
-                    logger.info(f"Sentence {idx}: sent {chunk_count} chunks")
-
+                        
+                    finally:
+                        # 清理临时文件
+                        try:
+                            os.unlink(temp_path)
+                        except:
+                            pass
+                    
                     # 发送句子结束标记
                     await websocket.send_json({
                         "type": "sentence_end",
                         "index": idx
                     })
-
+                
                 # 发送完成标记
                 await websocket.send_json({
                     "type": "done",
@@ -648,7 +625,7 @@ async def websocket_tts(websocket: WebSocket):
                     "total_bytes": total_bytes
                 })
                 logger.info(f"TTS completed: {len(sentences)} sentences, {total_chunks} chunks, {total_bytes} bytes")
-
+                
             except json.JSONDecodeError:
                 await websocket.send_json({
                     "type": "error",
@@ -667,7 +644,7 @@ async def websocket_tts(websocket: WebSocket):
                     "type": "error",
                     "message": str(e)
                 })
-
+    
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
     except Exception as e:
@@ -677,6 +654,33 @@ async def websocket_tts(websocket: WebSocket):
             await websocket.close()
         except:
             pass
+
+def process_text(text: str, input_format: str = "plain") -> str:
+    """
+    处理输入文本
+    
+    处理流程:
+        1. 清洗 Markdown 格式 (如果 input_format="markdown")
+        2. 特殊符号处理
+        3. 注意：不再执行数字转英文逻辑，因为 MeloTTS ZH 模型可以直接处理中英文混合
+    
+    Args:
+        text: 输入文本
+        input_format: "plain" (纯文本) 或 "markdown" (Markdown格式)
+    
+    Returns:
+        处理后的文本
+    """
+    # 1. 清洗 Markdown 格式
+    if input_format == "markdown":
+        text = markdown_cleaner.clean(text)
+    
+    # 2. 特殊符号处理（保留中英文版本）
+    text = symbol_processor.process(text)
+    
+    # 3. 不再执行数字转英文逻辑，MeloTTS ZH 模型可以直接处理中英文混合文本
+    
+    return text
 
 if __name__ == "__main__":
     import uvicorn
