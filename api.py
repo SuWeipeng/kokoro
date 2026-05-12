@@ -217,16 +217,17 @@ def convert_audio_to_target_format(audio_bytes: bytes, target_sample_rate: int =
             try:
                 import subprocess
                 
-                # 先将音频数据写入临时 WAV 文件（使用正确的参数）
+                # 先将音频数据写入临时 WAV 文件
                 temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
                 temp_wav_path = temp_wav.name
                 temp_wav.close()
                 
-                # 使用 soundfile 写入 WAV
-                # soundfile 默认将 float 数据视为归一化浮点数，范围 [-1, 1]，使用 FLOAT subtype
-                sf.write(temp_wav_path, audio_array, source_sr, format='WAV', subtype='FLOAT')
+                # 使用重采样后的采样率（audio_array 已经被 resample 到 target_sample_rate）
+                write_sr = target_sample_rate if source_sr != target_sample_rate else source_sr
+                # soundfile 默认将 float 数据视为归一化浮点数，范围 [-1, 1]
+                sf.write(temp_wav_path, audio_array, write_sr, format='WAV', subtype='FLOAT')
                 
-                # 使用 ffmpeg 转换为 MP3
+                # 使用 ffmpeg 转换为 MP3（不改变采样率）
                 temp_mp3 = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
                 temp_mp3_path = temp_mp3.name
                 temp_mp3.close()
@@ -235,7 +236,6 @@ def convert_audio_to_target_format(audio_bytes: bytes, target_sample_rate: int =
                     'ffmpeg', '-y', '-i', temp_wav_path,
                     '-acodec', 'libmp3lame',
                     '-b:a', '64k',
-                    '-ar', str(target_sample_rate),
                     temp_mp3_path
                 ]
                 
