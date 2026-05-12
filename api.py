@@ -24,17 +24,30 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 设备检查
+# 设备检查（跨平台兼容）
 def check_device():
     if torch.cuda.is_available():
-        print(f"CUDA available: {torch.cuda.get_device_name()}")
+        device_name = torch.cuda.get_device_name(0)
+        device_count = torch.cuda.device_count()
+        print(f"CUDA available: {device_name}")
         print(f"CUDA version: {torch.version.cuda}")
+        print(f"GPU count: {device_count}")
+        # 支持多 GPU 环境，自动选择可用设备
         return 'cuda:0'
+    elif torch.backends.mps.is_available():
+        # macOS MPS 支持
+        print("MPS (Apple Silicon) available")
+        return 'mps'
     else:
         print("Using CPU")
         return 'cpu'
 
-device = check_device()
+# 从环境变量读取设备（支持覆盖自动检测）
+# 支持的值: auto, cuda:0, cuda:1, cpu, mps
+device = os.environ.get('MeloTTS_DEVICE', 'auto')
+if device == 'auto':
+    device = check_device()
+print(f"Using device: {device}")
 
 # MeloTTS 模型单例（中文和英文分别加载）
 tts_models = {}  # {language: TTS instance}

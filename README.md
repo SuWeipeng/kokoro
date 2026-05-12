@@ -303,11 +303,94 @@ ws.onmessage = async (event) => {
 
 ## 配置说明
 
+### 跨平台支持
+
+本 API 支持 **Windows、Linux (Ubuntu)、macOS** 平台运行。
+
+#### Windows 启动
+
+```bash
+# 方式一：双击批处理文件
+start_service.bat
+
+# 方式二：命令行启动
+conda activate xiaozhi-esp32-server
+uvicorn api:api --host 0.0.0.0 --port 9880 --reload
+
+# PowerShell（指定设备）
+$env:MeloTTS_DEVICE="cuda:0"
+uvicorn api:api --host 0.0.0.0 --port 9880 --reload
+```
+
+#### Ubuntu/Linux 启动
+
+```bash
+# 激活环境
+conda activate xiaozhi-esp32-server
+
+# 启动服务
+uvicorn api:api --host 0.0.0.0 --port 9880 --reload
+
+# 指定 GPU 设备
+MeloTTS_DEVICE=cuda:0 uvicorn api:api --host 0.0.0.0 --port 9880 --reload
+
+# 后台运行（nohup）
+nohup uvicorn api:api --host 0.0.0.0 --port 9880 --reload > api.log 2>&1 &
+
+# 后台运行（systemd）
+# 创建 /etc/systemd/system/melotts.service
+# [Unit]
+# Description=MeloTTS Service
+# After=network.target
+# [Service]
+# User=your_user
+# WorkingDirectory=/path/to/project
+# ExecStart=/path/to/conda/envs/xiaozhi-esp32-server/bin/uvicorn api:api --host 0.0.0.0 --port 9880
+# [Install]
+# WantedBy=multi-user.target
+# systemctl enable melotts
+# systemctl start melotts
+```
+
+#### macOS 启动
+
+```bash
+# 激活环境
+conda activate xiaozhi-esp32-server
+
+# 启动服务（自动使用 MPS Apple Silicon）
+uvicorn api:api --host 0.0.0.0 --port 9880 --reload
+```
+
+#### 设备环境变量
+
+通过 `MeloTTS_DEVICE` 环境变量控制计算设备：
+
+| 值 | 说明 | 适用平台 |
+|----|------|----------|
+| `auto`（默认）| 自动检测（CUDA > MPS > CPU） | 所有平台 |
+| `cuda:0` | 使用 CUDA GPU 0 | Windows/Linux |
+| `cuda:1` | 使用 CUDA GPU 1 | Windows/Linux（多 GPU）|
+| `cpu` | 使用 CPU | 所有平台 |
+| `mps` | 使用 Apple Silicon MPS | macOS |
+
+示例：
+```bash
+# Linux
+MeloTTS_DEVICE=cuda:1 uvicorn api:api --host 0.0.0.0 --port 9880
+
+# Windows PowerShell
+$env:MeloTTS_DEVICE="cpu"; uvicorn api:api --host 0.0.0.0 --port 9880
+
+# macOS
+uvicorn api:api --host 0.0.0.0 --port 9880  # 自动使用 MPS
+```
+
 ### 端口配置
 
 默认端口：`9880`
 
-修改端口（编辑 `start_service.bat`）：
+修改端口（编辑 `start_service.bat` 或命令行）：
 ```bash
 uvicorn api:api --host 0.0.0.0 --port <新端口> --reload
 ```
