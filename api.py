@@ -203,14 +203,58 @@ def convert_audio_to_target_format(audio_bytes: bytes, target_sample_rate: int =
         sf.write(buffer, audio_array, target_sample_rate, format='WAV')
         media_type = "audio/wav"
     elif target_format.lower() in ["mp3", "mpeg"]:
-        # 尝试使用 mp3 格式
+        # 尝试使用 soundfile 编码 MP3
+        mp3_success = False
         try:
             sf.write(buffer, audio_array, target_sample_rate, format='MP3')
             media_type = "audio/mpeg"
-        except Exception:
-            # 如果 MP3 不支持，回退到 WAV
-            sf.write(buffer, audio_array, target_sample_rate, format='WAV')
-            media_type = "audio/wav"
+            mp3_success = True
+        except Exception as e:
+            print(f"soundfile MP3 encoding failed: {e}, trying pydub...")
+        
+        # 如果 soundfile 不支持 MP3，尝试使用 pydub
+        if not mp3_success:
+            try:
+                from pydub import AudioSegment
+                # 将 numpy 数组转换为 AudioSegment
+                # soundfile 输出的数据范围可能是 float32、int16 等
+                if audio_array.dtype == float32 or audio_array.dtype == np.float32:
+                    # 将 float32 转换为 int16
+                    audio_int16 = (audio_array * 32767).astype(np.int16)
+                elif audio_array.dtype == np.float64:
+                    audio_int16 = (audio_array * 32767).astype(np.int16)
+                elif audio_array.dtype == np.int16:
+                    audio_int16 = audio_array
+                elif audio_array.dtype == np.int32:
+                    audio_int16 = (audio_array / 256).astype(np.int16)
+                else:
+                    # 默认转换为 int16
+                    audio_int16 = (audio_array * 32767).astype(np.int16)
+                
+                # 创建 AudioSegment
+                audio_segment = AudioSegment(
+                    audio_int16.tobytes(),
+                    frame_rate=source_sr,
+                    byte_width=2,  # int16 = 2 bytes
+                    channels=1 if len(audio_array.shape) == 1 else audio_array.shape[1]
+                )
+                
+                # 重采样到目标采样率
+                audio_segment = audio_segment.set_frame_rate(target_sample_rate)
+                
+                # 导出为 MP3
+                buffer = io.BytesIO()
+                audio_segment.export(buffer, format="mp3", bitrate="64k")
+                media_type = "audio/mpeg"
+                print(f"pydub MP3 encoding successful")
+            except ImportError:
+                print("pydub not installed, falling back to WAV")
+                sf.write(buffer, audio_array, target_sample_rate, format='WAV')
+                media_type = "audio/wav"
+            except Exception as e:
+                print(f"pydub MP3 encoding failed: {e}, falling back to WAV")
+                sf.write(buffer, audio_array, target_sample_rate, format='WAV')
+                media_type = "audio/wav"
     else:
         # 默认使用 WAV
         sf.write(buffer, audio_array, target_sample_rate, format='WAV')
