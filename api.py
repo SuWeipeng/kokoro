@@ -210,55 +210,66 @@ def convert_audio_to_target_format(audio_bytes: bytes, target_sample_rate: int =
             media_type = "audio/mpeg"
             mp3_success = True
         except Exception as e:
-            print(f"soundfile MP3 encoding failed: {e}, trying pydub...")
+            print(f"soundfile MP3 encoding failed: {e}, trying ffmpeg...")
         
-        # 如果 soundfile 不支持 MP3，尝试使用 pydub
+        # 如果 soundfile 不支持 MP3，使用 ffmpeg 命令转换
         if not mp3_success:
             try:
-                from pydub import AudioSegment
-                # 将 numpy 数组转换为 AudioSegment
-                # soundfile 输出的数据范围可能是 float32、int16 等
-                if audio_array.dtype == np.float32 or audio_array.dtype == np.float64:
-                    # 将 float 转换为 int16
-                    audio_int16 = (audio_array * 32767).astype(np.int16)
-                elif audio_array.dtype == np.int16:
-                    audio_int16 = audio_array
-                elif audio_array.dtype == np.int32:
-                    audio_int16 = (audio_array / 256).astype(np.int16)
-                else:
-                    # 默认转换为 int16
-                    audio_int16 = (audio_array * 32767).astype(np.int16)
+                import subprocess
                 
-                # 确定声道数
-                if len(audio_array.shape) == 1:
-                    channels = 1
-                else:
-                    channels = audio_array.shape[1]
+                # 先将音频数据写入临时 WAV 文件（使用正确的参数）
+                temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                temp_wav_path = temp_wav.name
+                temp_wav.close()
                 
-                # 创建 AudioSegment（使用 raw 参数直接传入原始数据）
-                audio_segment = AudioSegment(
-                    data=audio_int16.tobytes(),
-                    frame_rate=source_sr,
-                    sample_width=2,  # int16 = 2 bytes
-                    channels=channels
-                )
+                # 使用 soundfile 写入 WAV，指定正确的参数
+                # soundfile 默认将 float 数据视为归一化浮点数，范围 [-1, 1]
+                sf.write(temp_wav_path, audio_array, source_sr, format='WAV', subtype='PCM_16')
                 
-                # 重采样到目标采样率
-                audio_segment = audio_segment.set_frame_rate(target_sample_rate)
+                # 使用 ffmpeg 转换为 MP3
+                temp_mp3 = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                temp_mp3_path = temp_mp3.name
+                temp_mp3.close()
                 
-                # 导出为 MP3
-                buffer = io.BytesIO()
-                audio_segment.export(buffer, format="mp3", bitrate="64k")
+                cmd = [
+                    'ffmpeg', '-y', '-i', temp_wav_path,
+                    '-acodec', 'libmp3lame',
+                    '-b:a', '64k',
+                    '-ar', str(target_sample_rate),
+                    temp_mp3_path
+                ]
+                
+                subprocess.run(cmd, capture_output=True, check=True)
+                
+                # 读取 MP3 数据
+                with open(temp_mp3_path, 'rb') as f:
+                    audio_bytes = f.read()
+                
+                buffer = io.BytesIO(audio_bytes)
                 media_type = "audio/mpeg"
-                print(f"pydub MP3 encoding successful")
-            except ImportError:
-                print("pydub not installed, falling back to WAV")
+                print(f"ffmpeg MP3 encoding successful")
+                
+                # 清理临时文件
+                os.unlink(temp_wav_path)
+                os.unlink(temp_mp3_path)
+                
+            except FileNotFoundError:
+                print("ffmpeg not installed, falling back to WAV")
                 sf.write(buffer, audio_array, target_sample_rate, format='WAV')
                 media_type = "audio/wav"
             except Exception as e:
-                print(f"pydub MP3 encoding failed: {e}, falling back to WAV")
+                print(f"ffmpeg MP3 encoding failed: {e}, falling back to WAV")
                 sf.write(buffer, audio_array, target_sample_rate, format='WAV')
                 media_type = "audio/wav"
+                # 清理可能的临时文件
+                try:
+                    os.unlink(temp_wav_path)
+                except:
+                    pass
+                try:
+                    os.unlink(temp_mp3_path)
+                except:
+                    pass
     else:
         # 默认使用 WAV
         sf.write(buffer, audio_array, target_sample_rate, format='WAV')
