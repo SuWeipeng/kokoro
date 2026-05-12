@@ -219,9 +219,7 @@ def convert_audio_to_target_format(audio_bytes: bytes, target_sample_rate: int =
                 # 将 numpy 数组转换为 AudioSegment
                 # soundfile 输出的数据范围可能是 float32、int16 等
                 if audio_array.dtype == np.float32 or audio_array.dtype == np.float64:
-                    # 将 float32 转换为 int16
-                    audio_int16 = (audio_array * 32767).astype(np.int16)
-                elif audio_array.dtype == np.float64:
+                    # 将 float 转换为 int16
                     audio_int16 = (audio_array * 32767).astype(np.int16)
                 elif audio_array.dtype == np.int16:
                     audio_int16 = audio_array
@@ -231,12 +229,18 @@ def convert_audio_to_target_format(audio_bytes: bytes, target_sample_rate: int =
                     # 默认转换为 int16
                     audio_int16 = (audio_array * 32767).astype(np.int16)
                 
-                # 创建 AudioSegment
+                # 确定声道数
+                if len(audio_array.shape) == 1:
+                    channels = 1
+                else:
+                    channels = audio_array.shape[1]
+                
+                # 创建 AudioSegment（使用 raw 参数直接传入原始数据）
                 audio_segment = AudioSegment(
-                    audio_int16.tobytes(),
+                    data=audio_int16.tobytes(),
                     frame_rate=source_sr,
-                    byte_width=2,  # int16 = 2 bytes
-                    channels=1 if len(audio_array.shape) == 1 else audio_array.shape[1]
+                    sample_width=2,  # int16 = 2 bytes
+                    channels=channels
                 )
                 
                 # 重采样到目标采样率
