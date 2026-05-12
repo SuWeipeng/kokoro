@@ -218,7 +218,7 @@ def convert_audio_to_target_format(audio_bytes: bytes, target_sample_rate: int =
                 from pydub import AudioSegment
                 # 将 numpy 数组转换为 AudioSegment
                 # soundfile 输出的数据范围可能是 float32、int16 等
-                if audio_array.dtype == float32 or audio_array.dtype == np.float32:
+                if audio_array.dtype == np.float32 or audio_array.dtype == np.float64:
                     # 将 float32 转换为 int16
                     audio_int16 = (audio_array * 32767).astype(np.int16)
                 elif audio_array.dtype == np.float64:
